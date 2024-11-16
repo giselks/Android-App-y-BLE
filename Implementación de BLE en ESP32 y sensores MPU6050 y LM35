@@ -1,0 +1,102 @@
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+#include <Wire.h>
+#include <MPU6050.h>
+#include "esp_sleep.h"
+
+BLEServer* pServer = NULL;
+BLECharacteristic* pCharacteristic = NULL;
+bool deviceConnected = false;
+
+// UUID para el servicio y la característica
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// Pines
+#define BUTTON_PIN 4         // Define el pin del botón
+#define LM35_PIN 34          // Pin analógico donde está conectado el LM35
+
+MPU6050 mpu;
+volatile bool goToSleep = false;
+
+void IRAM_ATTR handleButtonPress() {
+  goToSleep = !goToSleep; // Cambia el estado de la variable cada vez que se presiona el botón
+}
+
+void setup() {
+  // Inicializa la comunicación serial
+  Serial.begin(115200);
+
+  // Configura Bluetooth
+  BLEDevice::init("ESP32_Gyroscope_Temp");
+  pServer = BLEDevice::createServer();
+  
+  // Inicia el servicio y la característica
+  BLEService* pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID,
+                      BLECharacteristic::PROPERTY_READ |
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+                    
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+
+  // Inicia la publicidad de Bluetooth
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->start();
+
+  // Inicia el MPU6050
+  Wire.begin();
+  mpu.initialize();
+
+  // Verifica que el sensor esté conectado
+  if (mpu.testConnection()) {
+    Serial.println("MPU6050 conectado exitosamente.");
+  } else {
+    Serial.println("Error al conectar el MPU6050.");
+  }
+
+  // Configura el botón
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButtonPress, FALLING);  // Configura la interrupción al presionar el botón
+}
+
+void loop() {
+  // Verifica si se debe entrar en modo sleep
+  if (goToSleep) {
+    Serial.println("Entrando en modo sleep...");
+
+    // Detiene el Bluetooth antes de dormir
+    BLEDevice::deinit();
+
+    // Configura el ESP32 para despertarse con el botón
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)BUTTON_PIN, 0); // Configura para despertar cuando el botón se presiona
+
+    // Entra en modo de sueño profundo
+    esp_deep_sleep_start();
+  }
+
+  // Lee los valores del giroscopio
+  int16_t gx, gy, gz;
+  mpu.getRotation(&gx, &gy, &gz);
+
+  // Lee el valor del LM35 y convierte a temperatura en grados Celsius
+  int lm35Raw = analogRead(LM35_PIN);
+  float temperature = lm35Raw * (3.3 / 4095.0) * 100.0; // Conversión a grados Celsius para LM35
+
+  // Convierte los valores de giroscopio y temperatura a una cadena
+  char dataStr[64];
+  snprintf(dataStr, sizeof(dataStr), "X:%d,y:%d,z:%d,T:%.2f C", gx, gy, gz, temperature);
+
+  // Imprime los datos en el monitor serial
+  Serial.println(dataStr);
+
+  // Envía los datos del giroscopio y temperatura por BLE
+  pCharacteristic->setValue(dataStr);
+  pCharacteristic->notify(); // Notifica el valor a los dispositivos conectados
+
+  delay(100); // Espera 100 ms antes de la siguiente lectura
+}
